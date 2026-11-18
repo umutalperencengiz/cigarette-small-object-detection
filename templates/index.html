@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cigarette Small Object Detection — A Comparative Study</title>
+  <meta name="description" content="Faster R-CNN, RetinaNet and YOLO11 compared on a merged 11,056-image cigarette dataset — paper, metrics and a live browser demo." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23080b10'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%2335d0a5'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+
+  <header class="topbar">
+    <a class="brand" href="#top">
+      <span class="brand-mark"></span>
+      <span class="brand-text">cigarette<b>detection</b></span>
+    </a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="#results">Results</a>
+      <a href="#demo">Demo</a>
+      <a href="#gallery">Gallery</a>
+      <a href="#dataset">Dataset</a>
+      <a href="#method">Method</a>
+    </nav>
+    <span class="status-pill" id="statusPill">
+      <span class="status-dot"></span><span id="statusText">connecting</span>
+    </span>
+  </header>
+
+  <main id="top" class="shell">
+
+    <!-- ================================================== HERO -->
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="eyebrow-dot"></span>Comparative study · October 2025</p>
+        <h1>A cigarette is a small object. Can a detector find it?</h1>
+        <p class="lede">
+          Faster R-CNN, RetinaNet and YOLO11, trained on the same merged 11,056-image dataset.
+          The question is not only which model is most accurate, but what that accuracy costs in
+          training time — and on small objects the gap is wider than the headline AP suggests.
+        </p>
+        <p class="paper-title">
+          “A Comparative Analysis of Convolutional Neural Networks for Cigarette Small Object Detection”
+          <span>Umut Alperen Cengiz · unpublished manuscript</span>
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn--primary" href="{{ url_for('static', filename='paper/SmallObjectDetectionPaper.pdf') }}" target="_blank" rel="noopener">Read the paper</a>
+          <a class="btn" href="#demo">Try the live demo</a>
+          <a class="btn btn--ghost" href="https://github.com/umutalperencengiz/SmallObjectDetectioPaper-Unpublished-" target="_blank" rel="noopener">GitHub ↗</a>
+        </div>
+        <div class="chips">
+          <span class="chip" id="chipModel">model: —</span>
+          <span class="chip">1 class · cigarette</span>
+          <span class="chip">local inference</span>
+        </div>
+      </div>
+
+      <figure class="hero-figure">
+        <img src="{{ url_for('static', filename='img/hero-yolo11.png') }}" alt="YOLO11 detecting a cigarette at 0.73 confidence in a film frame" />
+        <figcaption><span>YOLO11 · 0.73</span>One class, one box, 640 px input.</figcaption>
+      </figure>
+    </section>
+
+    <!-- ================================================== KEY NUMBERS -->
+    <section class="stats-strip" aria-label="Headline results">
+      <div class="stat-card">
+        <b>43.6</b>
+        <span>AP · Faster R-CNN</span>
+        <small>best overall accuracy</small>
+      </div>
+      <div class="stat-card">
+        <b>88.5</b>
+        <span>AP<sub>50</sub> · YOLO11</span>
+        <small>best loose-overlap score</small>
+      </div>
+      <div class="stat-card">
+        <b>27.4</b>
+        <span>AP<sub>small</sub> · Faster R-CNN</span>
+        <small>the hard case</small>
+      </div>
+      <div class="stat-card">
+        <b>3–4 h</b>
+        <span>training · YOLO11</span>
+        <small>vs 10–12 h two-stage</small>
+      </div>
+    </section>
+
+    <!-- ================================================== RESULTS -->
+    <section id="results" class="section">
+      <div class="section-head">
+        <div>
+          <h2>Three architectures, one dataset</h2>
+          <p>
+            Average precision on the 1,370-image validation split. Higher is better; AP<sub>small</sub>
+            isolates objects under 32² pixels, which is where a cigarette usually lives.
+          </p>
+        </div>
+        <span class="badge">Table 1 of the manuscript</span>
+      </div>
+
+      <div class="results-grid">
+        <div class="card table-card">
+          <div class="table-wrap">
+            <table class="results-table">
+              <thead>
+                <tr>
+                  <th scope="col">Model</th>
+                  <th scope="col">AP</th>
+                  <th scope="col">AP50</th>
+                  <th scope="col">AP75</th>
+                  <th scope="col">APs</th>
+                  <th scope="col">APm</th>
+                  <th scope="col">APl</th>
+                  <th scope="col">Train</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row"><i class="dot" style="--c:#3b9bff"></i>Faster R-CNN<small>R50-FPN · 2-stage</small></th>
+                  <td class="best">43.64</td>
+                  <td>87.25</td>
+                  <td class="best">38.95</td>
+                  <td class="best">27.41</td>
+                  <td class="best">45.07</td>
+                  <td class="best">51.75</td>
+                  <td>10–12 h</td>
+                </tr>
+                <tr>
+                  <th scope="row"><i class="dot" style="--c:#ffb454"></i>RetinaNet<small>R50-FPN · 1-stage</small></th>
+                  <td>41.76</td>
+                  <td>84.67</td>
+                  <td>35.70</td>
+                  <td>24.30</td>
+                  <td>43.36</td>
+                  <td>51.23</td>
+                  <td>8–10 h</td>
+                </tr>
+                <tr>
+                  <th scope="row"><i class="dot" style="--c:#35d0a5"></i>YOLO11<small>nano · 1-stage</small></th>
+                  <td>40.40</td>
+                  <td class="best">88.50</td>
+                  <td>35.20</td>
+                  <td class="muted">—</td>
+                  <td class="muted">—</td>
+                  <td class="muted">—</td>
+                  <td class="best">3–4 h</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="table-note">
+            Values reproduced verbatim from the manuscript. Ultralytics does not report size-bucketed
+            AP, hence the dashes. Training times are wall-clock on one RTX 3060 (6&nbsp;GB).
+          </p>
+        </div>
+
+        <div class="card chart-card">
+          <h3>Average precision by metric</h3>
+          <div class="legend">
+            <span><i style="--c:#3b9bff"></i>Faster R-CNN</span>
+            <span><i style="--c:#ffb454"></i>RetinaNet</span>
+            <span><i style="--c:#35d0a5"></i>YOLO11</span>
+          </div>
+          <div class="chart-box"><canvas id="apChart" aria-label="Grouped bar chart of average precision"></canvas></div>
+
+          <h3 class="chart-title-2">Accuracy against training time</h3>
+          <div class="chart-box chart-box--short"><canvas id="timeChart" aria-label="Scatter chart of AP against training hours"></canvas></div>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Reading the table.</strong> Faster R-CNN wins on every metric except AP<sub>50</sub>, and
+        its margin grows as the IoU threshold tightens — 38.95 vs 35.70 on AP<sub>75</sub>. YOLO11 gives up
+        3.2 AP overall but trains in roughly a third of the time, which is the trade the paper argues for.
+      </div>
+    </section>
+
+    <!-- ================================================== DEMO -->
+    <section id="demo" class="section">
+      <div class="section-head">
+        <div>
+          <h2>Run the model in your browser</h2>
+          <p>
+            The checkpoint shipped with this page is the YOLO11n model from the study. Upload an image,
+            analyze a clip, or point a camera at a screen — inference happens on this machine.
+          </p>
+        </div>
+        <span class="badge badge--live"><span class="live-dot"></span>YOLO11n · live</span>
+      </div>
+
+      <p class="demo-note">
+        Faster R-CNN and RetinaNet are not bundled: their checkpoints are 322&nbsp;MB and 296&nbsp;MB and were
+        trained for CUDA. Their predictions from the paper are in the gallery below.
+      </p>
+
+      <div class="controls" aria-label="Detection settings">
+        <label class="control">
+          <span>Confidence <output id="confValue">0.25</output></span>
+          <input id="conf" type="range" min="0.05" max="0.95" step="0.05" value="0.25" />
+        </label>
+        <label class="control">
+          <span>IoU <output id="iouValue">0.45</output></span>
+          <input id="iou" type="range" min="0.05" max="0.95" step="0.05" value="0.45" />
+        </label>
+        <div class="control control--note">
+          <span>Tip</span>
+          <p>Lower confidence finds more candidates; raise it when a scene is cluttered or low-contrast.</p>
+        </div>
+      </div>
+
+      <nav class="tabs" role="tablist">
+        <button class="tab is-active" data-tab="image" role="tab" aria-selected="true">Image</button>
+        <button class="tab" data-tab="video" role="tab" aria-selected="false">Video</button>
+        <button class="tab" data-tab="camera" role="tab" aria-selected="false">Camera</button>
+      </nav>
+
+      <!-- IMAGE --------------------------------------------------------- -->
+      <section class="panel is-active" id="tab-image" role="tabpanel">
+        <div class="grid">
+          <div class="card">
+            <h2>Upload an image</h2>
+            <label class="dropzone" id="imageDrop">
+              <input id="imageInput" type="file" accept="image/*" hidden />
+              <span class="dropzone-icon">＋</span>
+              <span>Drop a frame here or click to browse</span>
+              <small>JPG, PNG, WEBP · processed at native resolution</small>
+            </label>
+            <div class="hint" id="imageHint">No image loaded yet.</div>
+          </div>
+
+          <div class="card">
+            <h2>Result</h2>
+            <div class="preview">
+              <img id="imagePreview" alt="Annotated detection result" hidden />
+              <div class="preview-empty" id="imageEmpty">Annotated frame will appear here.</div>
+            </div>
+            <div class="stats" id="imageStats"></div>
+            <ul class="detections" id="imageDetections"></ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- VIDEO --------------------------------------------------------- -->
+      <section class="panel" id="tab-video" role="tabpanel">
+        <div class="grid">
+          <div class="card">
+            <h2>Analyze a clip</h2>
+            <label class="dropzone" id="videoDrop">
+              <input id="videoInput" type="file" accept="video/*" hidden />
+              <span class="dropzone-icon">▶</span>
+              <span>Drop a clip here or click to browse</span>
+              <small>MP4, AVI, MOV, MKV · capped at 3 minutes</small>
+            </label>
+
+            <div class="inline-fields">
+              <label class="control">
+                <span>Samples per second <output id="fpsValue">3</output></span>
+                <input id="videoFps" type="range" min="1" max="10" step="1" value="3" />
+              </label>
+              <label class="control">
+                <span>Max frames <output id="maxFramesValue">180</output></span>
+                <input id="videoMaxFrames" type="range" min="30" max="600" step="30" value="180" />
+              </label>
+            </div>
+
+            <button class="btn btn--primary" id="videoRun" disabled>Start analysis</button>
+
+            <div class="progress" id="videoProgress" hidden>
+              <div class="progress-bar"><span id="videoProgressFill"></span></div>
+              <div class="progress-label" id="videoProgressLabel">Waiting…</div>
+            </div>
+            <div class="hint" id="videoHint"></div>
+          </div>
+
+          <div class="card">
+            <h2>Annotated video</h2>
+            <div class="preview preview--video">
+              <video id="videoResult" controls playsinline hidden></video>
+              <div class="preview-empty" id="videoEmpty">The processed clip will appear here.</div>
+            </div>
+            <div class="stats" id="videoStats"></div>
+            <div class="timeline" id="videoTimeline"></div>
+            <ul class="events" id="videoEvents"></ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- CAMERA -------------------------------------------------------- -->
+      <section class="panel" id="tab-camera" role="tabpanel">
+        <div class="grid">
+          <div class="card">
+            <h2>Live camera</h2>
+            <div class="camera-wrap">
+              <video id="cameraVideo" autoplay muted playsinline></video>
+              <canvas id="cameraOverlay"></canvas>
+              <div class="camera-placeholder" id="cameraPlaceholder">Camera is off.</div>
+            </div>
+            <div class="camera-actions">
+              <button class="btn btn--primary" id="cameraStart">Start camera</button>
+              <button class="btn" id="cameraStop" disabled>Stop</button>
+            </div>
+            <div class="hint" id="cameraHint">Frames are analyzed on this machine at a few frames per second.</div>
+          </div>
+
+          <div class="card">
+            <h2>Live signal</h2>
+            <div class="alert" id="cameraAlert" hidden>
+              <strong>Cigarette detected</strong>
+              <span id="cameraAlertDetail"></span>
+            </div>
+            <div class="stats" id="cameraStats"></div>
+            <div class="meter">
+              <div class="meter-fill" id="cameraMeter"></div>
+            </div>
+            <canvas id="cameraSparkline" width="560" height="120"></canvas>
+            <ul class="detections" id="cameraDetections"></ul>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <!-- ================================================== GALLERY -->
+    <section id="gallery" class="section">
+      <div class="section-head">
+        <div>
+          <h2>What the models actually see</h2>
+          <p>
+            The same four frames through each detector, thresholded at different operating points.
+            Note how the two-stage model stacks boxes while YOLO11 keeps one confident box.
+          </p>
+        </div>
+        <span class="badge">Figures 4.1–4.3 of the manuscript</span>
+      </div>
+
+      <div class="gallery">
+        <figure class="card gallery-card">
+          <img src="{{ url_for('static', filename='img/pred-faster-rcnn.png') }}" alt="Faster R-CNN predictions on four frames" />
+          <figcaption>
+            <b>Faster R-CNN</b>
+            <span>Highest confidence overall (0.99, 0.94), but overlapping proposals remain after NMS at this threshold.</span>
+          </figcaption>
+        </figure>
+        <figure class="card gallery-card">
+          <img src="{{ url_for('static', filename='img/pred-retinanet.png') }}" alt="RetinaNet predictions on four frames" />
+          <figcaption>
+            <b>RetinaNet</b>
+            <span>Focal loss keeps hard positives alive: 0.82, 0.41, 0.49 — the middle of the road.</span>
+          </figcaption>
+        </figure>
+        <figure class="card gallery-card">
+          <img src="{{ url_for('static', filename='img/pred-yolo11.png') }}" alt="YOLO11 predictions on four frames" />
+          <figcaption>
+            <b>YOLO11</b>
+            <span>Clean single boxes at 0.92, 0.90 and 0.59, at a fraction of the training cost.</span>
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <!-- ================================================== DATASET -->
+    <section id="dataset" class="section">
+      <div class="section-head">
+        <div>
+          <h2>One dataset, three sources</h2>
+          <p>
+            Three public Roboflow sets were merged into a single <code>cigarette</code> class.
+            Duplicates and false annotations were removed before training.
+          </p>
+        </div>
+      </div>
+
+      <div class="dataset-grid">
+        <ul class="source-list">
+          <li>
+            <div><b>Smoking Detection</b><span>Lppro · CC BY 4.0</span></div>
+            <a href="https://universe.roboflow.com/lppro/smoking-detection-yg80w" target="_blank" rel="noopener">Roboflow ↗</a>
+          </li>
+          <li>
+            <div><b>Cigarette</b><span>PhoneDT · CC BY 4.0</span></div>
+            <a href="https://universe.roboflow.com/phonedt/cigarette-bkjaq" target="_blank" rel="noopener">Roboflow ↗</a>
+          </li>
+          <li>
+            <div><b>Smoke Detection</b><span>ENSAM · CC BY 4.0</span></div>
+            <a href="https://universe.roboflow.com/ensam-swz2h/smoke-detection-88ggt" target="_blank" rel="noopener">Roboflow ↗</a>
+          </li>
+        </ul>
+
+        <div class="split-panel">
+          <div class="split-row"><b>11,056</b><span>training images</span></div>
+          <div class="split-row"><b>1,370</b><span>validation images</span></div>
+          <div class="split-row"><b>1,868</b><span>test images</span></div>
+          <p class="muted">The test split was used for qualitative checks only, never for model selection.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================== METHOD -->
+    <section id="method" class="section">
+      <div class="section-head">
+        <div>
+          <h2>Training setup</h2>
+          <p>
+            Everything ran on one RTX 3060 with 6&nbsp;GB of VRAM and 16&nbsp;GB of DDR4 — which is why the
+            Detectron2 batch size is 4 with two gradient-accumulation steps.
+          </p>
+        </div>
+      </div>
+
+      <div class="method-grid">
+        <div class="card config-card">
+          <h3>Detectron2 — Faster R-CNN &amp; RetinaNet</h3>
+          <dl>
+            <div><dt>Configs</dt><dd>COCO-Detection/faster_rcnn_R_50_FPN_1x.yaml<br />COCO-Detection/retinanet_R_50_FPN_1x.yaml</dd></div>
+            <div><dt>Iterations</dt><dd>35,000 ≈ 25 epochs</dd></div>
+            <div><dt>Batch</dt><dd>4 × 2 grad-accum</dd></div>
+            <div><dt>Optimizer</dt><dd>Adam · 1e-3 (AMP on)</dd></div>
+            <div><dt>Data loading</dt><dd>16 workers</dd></div>
+          </dl>
+        </div>
+
+        <div class="card config-card">
+          <h3>Ultralytics — YOLO11n</h3>
+          <dl>
+            <div><dt>Checkpoint</dt><dd>yolo11n.pt (COCO init)</dd></div>
+            <div><dt>Epochs</dt><dd>80, early stop at 72</dd></div>
+            <div><dt>Input</dt><dd>640 × 640</dd></div>
+            <div><dt>Batch</dt><dd>16, 8 workers</dd></div>
+            <div><dt>Optimizer</dt><dd>Adam · 1e-4, patience 10</dd></div>
+          </dl>
+        </div>
+      </div>
+
+      <div class="arch-strip">
+        <figure>
+          <img src="{{ url_for('static', filename='img/arch-faster-rcnn.png') }}" alt="Faster R-CNN architecture" />
+          <figcaption>Faster R-CNN: RPN proposals → RoI pooling → classifier.</figcaption>
+        </figure>
+        <figure>
+          <img src="{{ url_for('static', filename='img/arch-retinanet.png') }}" alt="RetinaNet architecture" />
+          <figcaption>RetinaNet: FPN features → class and box subnets.</figcaption>
+        </figure>
+        <figure>
+          <img src="{{ url_for('static', filename='img/arch-yolo11.png') }}" alt="YOLO11 blocks: SPPF, C2PSA, C3K2" />
+          <figcaption>YOLO11: SPPF, C2PSA attention and C3K2 blocks.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <!-- ================================================== FINDINGS -->
+    <section id="findings" class="section">
+      <div class="section-head">
+        <div>
+          <h2>What the comparison shows</h2>
+        </div>
+      </div>
+
+      <div class="findings">
+        <article class="card finding">
+          <span class="finding-index">01</span>
+          <h3>Two-stage still wins on accuracy</h3>
+          <p>Faster R-CNN leads on AP, AP<sub>75</sub> and every size bucket. On small objects the margin is 3.1 AP over RetinaNet — the proposal step earns its keep.</p>
+        </article>
+        <article class="card finding">
+          <span class="finding-index">02</span>
+          <h3>YOLO11 wins on speed, not on precision</h3>
+          <p>3–4 hours against 10–12, and the best AP<sub>50</sub> of the three. But it trails by 3 AP overall, which is the price of a single pass and a nano backbone.</p>
+        </article>
+        <article class="card finding">
+          <span class="finding-index">03</span>
+          <h3>Focal loss matters less with one class</h3>
+          <p>RetinaNet's headline trick targets class imbalance. With a single cigarette class it still helps hard positives, but the advantage over YOLO11 shrinks.</p>
+        </article>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <div class="footer-links">
+        <a href="{{ url_for('static', filename='paper/SmallObjectDetectionPaper.pdf') }}" target="_blank" rel="noopener">Paper (PDF)</a>
+        <a href="https://github.com/umutalperencengiz/SmallObjectDetectioPaper-Unpublished-" target="_blank" rel="noopener">Paper repository</a>
+        <a href="#demo">Live demo</a>
+      </div>
+      <p class="footer-note">
+        A standalone object-detection study, separate from the IR video anomaly detection capstone.
+        Research and education only — do not deploy on people without consent.
+      </p>
+      <p class="footer-meta">Flask · Ultralytics YOLO11 · inference on this machine</p>
+    </footer>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
