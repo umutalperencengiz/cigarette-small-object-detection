@@ -4,11 +4,6 @@ __pycache__/
 venv/
 env/
 
-# generated outputs
-static/results/*
-!static/results/.gitkeep
-
-# model weights are tracked (5 MB), larger ones should use Releases
 *.log
 .DS_Store
 Thumbs.db

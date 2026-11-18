@@ -1,7 +1,11 @@
-/* Cigarette small-object detection — page controller + YOLO11 demo */
+/* Cigarette small-object detection — page controller + in-browser YOLO11 demo */
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+const MODEL_URL = "models/cigarette_yolo11n.onnx";
+const INPUT = 640;
+const CLASS_NAME = "cigarette";
 
 const state = {
   conf: 0.25,
@@ -25,25 +29,255 @@ function setStatus(text, kind = "") {
 const statBox = (value, label, accent = false) =>
   `<div class="stat${accent ? " accent" : ""}"><b>${value}</b><span>${label}</span></div>`;
 
-async function postForm(url, formData) {
-  const res = await fetch(url, { method: "POST", body: formData });
-  const payload = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(payload.error || `Request failed (${res.status})`);
-  return payload;
+function once(target, event, timeout = 20000) {
+  return new Promise((resolve, reject) => {
+    let timer = null;
+    const done = () => {
+      cleanup();
+      resolve();
+    };
+    const fail = () => {
+      cleanup();
+      reject(new Error("The browser could not decode this file."));
+    };
+    const cleanup = () => {
+      target.removeEventListener(event, done);
+      target.removeEventListener("error", fail);
+      if (timer) clearTimeout(timer);
+    };
+    target.addEventListener(event, done);
+    target.addEventListener("error", fail);
+    if (timeout) {
+      timer = setTimeout(() => {
+        cleanup();
+        reject(new Error("Timed out while reading the file."));
+      }, timeout);
+    }
+  });
 }
 
-/* ----------------------------------------------------------------- health */
-(async function loadHealth() {
-  try {
-    const data = await (await fetch("/api/health")).json();
-    const chip = $("#chipModel");
-    if (chip) chip.textContent = `model: ${data.model}`;
+/* --------------------------------------------------------- inference engine */
+const engine = {
+  session: null,
+  promise: null,
+  input: document.createElement("canvas"),
+  ctx: null,
+};
+
+engine.input.width = INPUT;
+engine.input.height = INPUT;
+engine.ctx = engine.input.getContext("2d", { willReadFrequently: true });
+
+function loadEngine() {
+  if (engine.promise) return engine.promise;
+
+  setStatus("loading model", "");
+  $("#chipModel").textContent = "model: yolo11n.onnx";
+
+  engine.promise = (async () => {
+    if (typeof ort === "undefined") {
+      throw new Error("ONNX Runtime could not be loaded — check your connection and reload the page.");
+    }
+
+    // GitHub Pages cannot send COOP/COEP headers, so request the single-threaded WASM path.
+    ort.env.wasm.numThreads = 1;
+    ort.env.wasm.simd = true;
+    ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
+
+    const session = await ort.InferenceSession.create(MODEL_URL, {
+      executionProviders: ["wasm"],
+      graphOptimizationLevel: "all",
+    });
+
+    engine.session = session;
     setStatus("model ready", "ok");
-  } catch (err) {
+    $("#chipModel").textContent = "model: yolo11n.onnx · wasm";
+    return session;
+  })().catch((err) => {
+    engine.promise = null;
     setStatus("model unavailable", "bad");
     console.error(err);
+    throw err;
+  });
+
+  return engine.promise;
+}
+
+loadEngine().catch(() => {});
+
+/** Letterbox the source into 640×640 and normalise to CHW float32. */
+function preprocess(source, sw, sh) {
+  const canvas = engine.input;
+  const ctx = engine.ctx;
+
+  const scale = Math.min(INPUT / sw, INPUT / sh);
+  const dw = Math.max(1, Math.round(sw * scale));
+  const dh = Math.max(1, Math.round(sh * scale));
+  const dx = Math.floor((INPUT - dw) / 2);
+  const dy = Math.floor((INPUT - dh) / 2);
+
+  ctx.fillStyle = "#727272";
+  ctx.fillRect(0, 0, INPUT, INPUT);
+  ctx.drawImage(source, 0, 0, sw, sh, dx, dy, dw, dh);
+
+  const { data } = ctx.getImageData(0, 0, INPUT, INPUT);
+  const plane = INPUT * INPUT;
+  const tensor = new Float32Array(plane * 3);
+
+  for (let i = 0, p = 0; i < plane; i += 1, p += 4) {
+    tensor[i] = data[p] / 255;
+    tensor[plane + i] = data[p + 1] / 255;
+    tensor[plane * 2 + i] = data[p + 2] / 255;
   }
-})();
+
+  return { tensor, meta: { scale, dx, dy, sw, sh } };
+}
+
+function boxIou(a, b) {
+  const x1 = Math.max(a[0], b[0]);
+  const y1 = Math.max(a[1], b[1]);
+  const x2 = Math.min(a[2], b[2]);
+  const y2 = Math.min(a[3], b[3]);
+  const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  if (!inter) return 0;
+  const areaA = Math.max(0, a[2] - a[0]) * Math.max(0, a[3] - a[1]);
+  const areaB = Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]);
+  return inter / (areaA + areaB - inter);
+}
+
+/** Decode the [1, 4+classes, anchors] output, threshold and run NMS. */
+function decode(raw, meta, confThreshold, iouThreshold) {
+  const anchors = raw.dims[2];
+  const channels = raw.dims[1];
+  const out = raw.data;
+
+  const boxes = [];
+  const scores = [];
+
+  for (let a = 0; a < anchors; a += 1) {
+    let best = 0;
+    for (let c = 4; c < channels; c += 1) {
+      const score = out[c * anchors + a];
+      if (score > best) best = score;
+    }
+    if (best < confThreshold) continue;
+
+    const cx = out[a];
+    const cy = out[anchors + a];
+    const w = out[anchors * 2 + a];
+    const h = out[anchors * 3 + a];
+
+    boxes.push([
+      (cx - w / 2 - meta.dx) / meta.scale,
+      (cy - h / 2 - meta.dy) / meta.scale,
+      (cx + w / 2 - meta.dx) / meta.scale,
+      (cy + h / 2 - meta.dy) / meta.scale,
+    ]);
+    scores.push(best);
+  }
+
+  const order = scores.map((_, i) => i).sort((a, b) => scores[b] - scores[a]);
+  const kept = [];
+
+  while (order.length) {
+    const index = order.shift();
+    kept.push(index);
+    for (let k = order.length - 1; k >= 0; k -= 1) {
+      if (boxIou(boxes[index], boxes[order[k]]) > iouThreshold) order.splice(k, 1);
+    }
+  }
+
+  return kept.map((index) => {
+    const [x1, y1, x2, y2] = boxes[index];
+    return {
+      label: CLASS_NAME,
+      confidence: scores[index],
+      box: [
+        Math.max(0, x1),
+        Math.max(0, y1),
+        Math.min(meta.sw, x2),
+        Math.min(meta.sh, y2),
+      ],
+    };
+  });
+}
+
+async function detect(source, sw, sh) {
+  const session = await loadEngine();
+  const started = performance.now();
+
+  const { tensor, meta } = preprocess(source, sw, sh);
+  const feeds = {
+    [session.inputNames[0]]: new ort.Tensor("float32", tensor, [1, 3, INPUT, INPUT]),
+  };
+
+  const output = await session.run(feeds);
+  const raw = output[session.outputNames[0]];
+  const detections = decode(raw, meta, state.conf, state.iou);
+
+  return {
+    detections,
+    inference_ms: Math.round(performance.now() - started),
+    width: sw,
+    height: sh,
+  };
+}
+
+/* ---------------------------------------------------------------- drawing */
+function drawLabels(ctx, detections, srcW, srcH, targetW, targetH, lineWidth, fontPx) {
+  const sx = targetW / srcW;
+  const sy = targetH / srcH;
+
+  ctx.lineWidth = lineWidth;
+  ctx.font = `${fontPx}px ui-monospace, Consolas, monospace`;
+  ctx.textBaseline = "top";
+
+  for (const det of detections) {
+    const [x1, y1, x2, y2] = det.box;
+    const X = x1 * sx;
+    const Y = y1 * sy;
+    const W = (x2 - x1) * sx;
+    const H = (y2 - y1) * sy;
+    const colour = det.confidence >= 0.5 ? "#35d0a5" : "#ffb454";
+
+    ctx.strokeStyle = colour;
+    ctx.strokeRect(X, Y, W, H);
+
+    const label = `${det.label} ${det.confidence.toFixed(2)}`;
+    const textWidth = ctx.measureText(label).width;
+    const labelY = Math.max(0, Y - fontPx - 6);
+
+    ctx.fillStyle = colour;
+    ctx.fillRect(X, labelY, textWidth + 10, fontPx + 6);
+    ctx.fillStyle = "#04120e";
+    ctx.fillText(label, X + 5, labelY + 3);
+  }
+}
+
+/** Draw source + boxes into a data URL so the <img> needs no extra layers. */
+function annotate(source, sw, sh, detections) {
+  const maxSide = 1280;
+  const scale = Math.min(1, maxSide / Math.max(sw, sh));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(sw * scale);
+  canvas.height = Math.round(sh * scale);
+
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(source, 0, 0, sw, sh, 0, 0, canvas.width, canvas.height);
+  drawLabels(
+    ctx,
+    detections,
+    sw,
+    sh,
+    canvas.width,
+    canvas.height,
+    Math.max(2, canvas.width / 320),
+    Math.max(12, canvas.width / 46)
+  );
+
+  return canvas.toDataURL("image/jpeg", 0.9);
+}
 
 /* ----------------------------------------------------------------- charts */
 const MODELS = [
@@ -223,6 +457,7 @@ window.addEventListener("resize", () => {
   clearTimeout(chartResizeTimer);
   chartResizeTimer = setTimeout(drawCharts, 120);
   if (state.cameraOn) resizeOverlay();
+  if (videoUi.samples.length) drawVideoOverlay();
 });
 
 if (document.fonts?.ready) {
@@ -260,6 +495,7 @@ $$(".tab").forEach((tab) => {
 
     if (tab.dataset.tab === "camera" && state.cameraOn) startCameraLoop();
     if (tab.dataset.tab !== "camera") stopCameraLoop();
+    if (tab.dataset.tab === "video" && videoUi.samples.length) drawVideoOverlay();
   });
 });
 
@@ -296,51 +532,113 @@ wireDropzone("#imageDrop", "#imageInput", handleImage);
 async function handleImage(file) {
   const hint = $("#imageHint");
   hint.className = "hint";
-  hint.textContent = "Running inference…";
+  hint.textContent = "Loading model…";
 
   try {
-    const fd = new FormData();
-    fd.append("image", file, file.name || "frame.jpg");
-    fd.append("conf", state.conf);
-    fd.append("iou", state.iou);
-    fd.append("annotate", "1");
+    const image = await createImageBitmap(file);
+    const sw = image.width;
+    const sh = image.height;
 
-    const data = await postForm("/api/detect", fd);
+    await loadEngine();
+    hint.textContent = "Running inference…";
+
+    const result = await detect(image, sw, sh);
+
     const preview = $("#imagePreview");
-    preview.src = data.annotated || URL.createObjectURL(file);
+    preview.src = annotate(image, sw, sh, result.detections);
     preview.hidden = false;
     $("#imageEmpty").hidden = true;
 
     $("#imageStats").innerHTML =
-      statBox(data.count, "detections", data.count > 0) +
-      statBox(`${data.inference_ms} ms`, "inference") +
-      statBox(`${data.width}×${data.height}`, "frame");
+      statBox(result.detections.length, "detections", result.detections.length > 0) +
+      statBox(`${result.inference_ms} ms`, "inference") +
+      statBox(`${sw}×${sh}`, "frame");
 
-    $("#imageDetections").innerHTML = data.detections.length
-      ? data.detections
+    $("#imageDetections").innerHTML = result.detections.length
+      ? result.detections
           .map(
             (d) =>
               `<li><span>${d.label}</span><span>conf ${fmt(d.confidence)}</span><span>[${d.box
                 .map((v) => Math.round(v))
                 .join(", ")}]</span></li>`
           )
+          .join("")
       : `<li><span>no detections</span><span>try a lower confidence</span></li>`;
 
-    hint.textContent = `${file.name} · ${(file.size / 1024).toFixed(0)} KB`;
+    hint.textContent = `${file.name || "image"} · ${(file.size / 1024).toFixed(0)} KB`;
+    image.close?.();
+  } catch (err) {
+    hint.className = "hint error";
+    hint.textContent = err.message;
+    console.error(err);
+  }
+}
+
+$("#imageSample").addEventListener("click", async () => {
+  const hint = $("#imageHint");
+  try {
+    hint.className = "hint";
+    hint.textContent = "Loading sample…";
+    const res = await fetch("static/samples/frame.jpg");
+    if (!res.ok) throw new Error(`Sample frame not found (${res.status}).`);
+    const blob = await res.blob();
+    await handleImage(new File([blob], "sample-frame.jpg", { type: blob.type || "image/jpeg" }));
   } catch (err) {
     hint.className = "hint error";
     hint.textContent = err.message;
   }
-}
+});
 
 /* ------------------------------------------------------------------ videos */
+const videoUi = { samples: [], url: null, file: null };
+
 wireDropzone("#videoDrop", "#videoInput", (file) => {
+  videoUi.file = file;
   $("#videoHint").textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(1)} MB`;
   $("#videoRun").disabled = false;
 });
 
-$("#videoRun").addEventListener("click", async () => {
-  const file = $("#videoInput").files[0];
+$("#videoSample").addEventListener("click", async () => {
+  const hint = $("#videoHint");
+  try {
+    hint.className = "hint";
+    hint.textContent = "Loading sample clip…";
+    const res = await fetch("static/samples/clip.mp4");
+    if (!res.ok) throw new Error(`Sample clip not found (${res.status}).`);
+    const blob = await res.blob();
+    videoUi.file = new File([blob], "sample-clip.mp4", { type: "video/mp4" });
+    hint.textContent = `sample-clip.mp4 · ${(blob.size / 1024).toFixed(0)} KB`;
+    $("#videoRun").disabled = false;
+  } catch (err) {
+    hint.className = "hint error";
+    hint.textContent = err.message;
+  }
+});
+
+$("#videoRun").addEventListener("click", runVideoAnalysis);
+
+function seekVideo(video, time) {
+  return new Promise((resolve, reject) => {
+    const done = () => {
+      cleanup();
+      resolve();
+    };
+    const fail = () => {
+      cleanup();
+      reject(new Error("The browser could not seek in this clip."));
+    };
+    const cleanup = () => {
+      video.removeEventListener("seeked", done);
+      video.removeEventListener("error", fail);
+    };
+    video.addEventListener("seeked", done);
+    video.addEventListener("error", fail);
+    video.currentTime = Math.min(Math.max(time, 0), Math.max(video.duration - 0.05, 0));
+  });
+}
+
+async function runVideoAnalysis() {
+  const file = videoUi.file;
   if (!file) return;
 
   const btn = $("#videoRun");
@@ -348,88 +646,238 @@ $("#videoRun").addEventListener("click", async () => {
   const fill = $("#videoProgressFill");
   const label = $("#videoProgressLabel");
   const hint = $("#videoHint");
+  const video = $("#videoResult");
+  const stage = $("#videoFrame");
+  const overlay = $("#videoOverlay");
 
   btn.disabled = true;
   hint.className = "hint";
-  hint.textContent = "Uploading…";
+  hint.textContent = "Loading model…";
   progress.hidden = false;
   fill.style.width = "2%";
-  label.textContent = "Queued";
+  label.textContent = "Loading model";
 
   try {
-    const fd = new FormData();
-    fd.append("video", file, file.name);
-    fd.append("conf", state.conf);
-    fd.append("iou", state.iou);
-    fd.append("fps", $("#videoFps").value);
-    fd.append("max_frames", $("#videoMaxFrames").value);
+    await loadEngine();
 
-    const { job_id } = await postForm("/api/video", fd);
-    pollJob(job_id, { fill, label, hint, btn });
+    if (videoUi.url) URL.revokeObjectURL(videoUi.url);
+    videoUi.samples = [];
+    videoUi.url = URL.createObjectURL(file);
+    video.src = videoUi.url;
+    video.muted = true;
+
+    stage.hidden = false;
+    $("#videoEmpty").hidden = true;
+    $("#videoStats").innerHTML = "";
+    $("#videoTimeline").innerHTML = "";
+    $("#videoEvents").innerHTML = "";
+    overlay.getContext("2d").clearRect(0, 0, overlay.width, overlay.height);
+
+    await once(video, "loadedmetadata");
+    const duration = video.duration;
+    if (!Number.isFinite(duration) || duration <= 0) {
+      throw new Error("That clip has no readable duration.");
+    }
+    if (duration > 180) {
+      throw new Error(`That clip is ${fmt(duration, 0)} s long — trim it to 3 minutes or less.`);
+    }
+
+    const fps = Number($("#videoFps").value);
+    const maxFrames = Number($("#videoMaxFrames").value);
+    const count = Math.max(1, Math.min(maxFrames, Math.floor(duration * fps)));
+
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+
+    hint.textContent = `Analyzing ${count} frames…`;
+    const started = performance.now();
+
+    for (let i = 0; i < count; i += 1) {
+      const t = ((i + 0.5) * duration) / count;
+      await seekVideo(video, t);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const result = await detect(canvas, canvas.width, canvas.height);
+      const peak = result.detections.reduce((max, d) => Math.max(max, d.confidence), 0);
+
+      videoUi.samples.push({
+        t,
+        count: result.detections.length,
+        maxConfidence: peak,
+        detections: result.detections.map((d) => ({
+          label: d.label,
+          confidence: d.confidence,
+          box: [
+            d.box[0] / canvas.width,
+            d.box[1] / canvas.height,
+            d.box[2] / canvas.width,
+            d.box[3] / canvas.height,
+          ],
+        })),
+      });
+
+      const pct = Math.round(((i + 1) / count) * 100);
+      fill.style.width = `${pct}%`;
+      label.textContent = `Frame ${i + 1} / ${count} · ${pct}%`;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    const elapsed = (performance.now() - started) / 1000;
+    fill.style.width = "100%";
+    label.textContent = `Complete · ${fmt(elapsed, 1)} s`;
+    hint.textContent = `${count} frames sampled at ${fps} fps. Press play to watch the overlay.`;
+
+    video.currentTime = 0;
+    renderVideoResult(duration);
+    drawVideoOverlay();
+
+    video.addEventListener("timeupdate", drawVideoOverlay);
+    video.addEventListener("seeked", drawVideoOverlay);
+    video.addEventListener("play", drawVideoOverlay);
   } catch (err) {
     hint.className = "hint error";
     hint.textContent = err.message;
+    label.textContent = "Stopped";
+    stage.hidden = true;
+    $("#videoEmpty").hidden = false;
+    console.error(err);
+  } finally {
     btn.disabled = false;
   }
-});
+}
 
-async function pollJob(jobId, ui) {
-  try {
-    const job = await (await fetch(`/api/job/${jobId}`)).json();
-    if (job.error) throw new Error(job.error);
+function nearestSample(time) {
+  const samples = videoUi.samples;
+  if (!samples.length) return null;
 
-    ui.fill.style.width = `${Math.max(job.progress || 0, 2)}%`;
-    ui.label.textContent = job.message || job.status;
-
-    if (job.status === "done") {
-      ui.fill.style.width = "100%";
-      ui.label.textContent = "Complete";
-      ui.hint.textContent = `Analyzed ${job.result.summary.frames_analyzed} frames.`;
-      renderVideoResult(job.result);
-      ui.btn.disabled = false;
-      return;
-    }
-    setTimeout(() => pollJob(jobId, ui), 800);
-  } catch (err) {
-    ui.hint.className = "hint error";
-    ui.hint.textContent = err.message;
-    ui.btn.disabled = false;
+  let lo = 0;
+  let hi = samples.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (samples[mid].t < time) lo = mid + 1;
+    else hi = mid;
   }
+
+  const before = samples[Math.max(0, lo - 1)];
+  const after = samples[lo];
+  return Math.abs(before.t - time) <= Math.abs(after.t - time) ? before : after;
 }
 
-function renderVideoResult(result) {
+function drawVideoOverlay() {
   const video = $("#videoResult");
-  video.src = result.video_url;
-  video.hidden = false;
-  $("#videoEmpty").hidden = true;
-  video.load();
+  const canvas = $("#videoOverlay");
+  if (video.hidden || !video.videoWidth) return;
 
-  const s = result.summary;
-  $("#videoStats").innerHTML =
-    statBox(s.total_detections, "detections", s.total_detections > 0) +
-    statBox(s.frames_with_detection, "frames hit") +
-    statBox(`${fmt(s.duration_seconds, 1)} s`, "analyzed") +
-    statBox(fmt(s.max_confidence), "max conf", s.max_confidence >= 0.5);
+  const rect = video.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
 
-  renderTimeline(result.timeline);
-  renderEvents(result.events);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const width = Math.round(rect.width * dpr);
+  const height = Math.round(rect.height * dpr);
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+
+  const sample = nearestSample(video.currentTime);
+  if (!sample || !sample.detections.length) return;
+
+  const boxes = sample.detections.map((d) => ({
+    label: d.label,
+    confidence: d.confidence,
+    box: [
+      d.box[0] * rect.width,
+      d.box[1] * rect.height,
+      d.box[2] * rect.width,
+      d.box[3] * rect.height,
+    ],
+  }));
+
+  drawLabels(
+    ctx,
+    boxes,
+    rect.width,
+    rect.height,
+    rect.width,
+    rect.height,
+    Math.max(2, rect.width / 320),
+    Math.max(12, rect.width / 46)
+  );
 }
 
-function renderTimeline(timeline) {
+function renderVideoResult(duration) {
+  const samples = videoUi.samples;
+  const total = samples.reduce((sum, s) => sum + s.count, 0);
+  const hit = samples.filter((s) => s.count > 0).length;
+  const peak = samples.reduce((max, s) => Math.max(max, s.maxConfidence), 0);
+
+  $("#videoStats").innerHTML =
+    statBox(total, "detections", total > 0) +
+    statBox(hit, "frames hit") +
+    statBox(`${fmt(duration, 1)} s`, "clip") +
+    statBox(fmt(peak), "max conf", peak >= 0.5);
+
+  renderTimeline(samples);
+  renderEvents(eventsFromSamples(samples));
+}
+
+function renderTimeline(samples) {
   const host = $("#videoTimeline");
   host.innerHTML = "";
-  if (!timeline.length) return;
+  if (!samples.length) return;
 
   const maxBars = 140;
-  const step = Math.max(1, Math.ceil(timeline.length / maxBars));
-  for (let i = 0; i < timeline.length; i += step) {
-    const sample = timeline[i];
+  const step = Math.max(1, Math.ceil(samples.length / maxBars));
+  for (let i = 0; i < samples.length; i += step) {
+    const sample = samples[i];
     const bar = document.createElement("div");
     bar.className = `bar${sample.count ? " hit" : ""}`;
-    bar.style.height = `${sample.count ? 22 + sample.max_confidence * 78 : 8}%`;
-    bar.title = `t=${fmt(sample.t)}s · ${sample.count} hit(s) · ${fmt(sample.max_confidence)}`;
+    bar.style.height = `${sample.count ? 22 + sample.maxConfidence * 78 : 8}%`;
+    bar.title = `t=${fmt(sample.t)}s · ${sample.count} hit(s) · ${fmt(sample.maxConfidence)}`;
     host.appendChild(bar);
   }
+}
+
+function eventsFromSamples(samples) {
+  const step = samples.length > 1 ? samples[1].t - samples[0].t : 0.33;
+  const events = [];
+  let current = null;
+
+  samples.forEach((sample) => {
+    if (!sample.count) {
+      current = null;
+      return;
+    }
+    if (current && sample.t - current.lastT <= step * 1.6) {
+      current.end = Math.min(sample.t + step / 2, current.end + step);
+      current.hits += sample.count;
+      current.max = Math.max(current.max, sample.maxConfidence);
+      current.lastT = sample.t;
+    } else {
+      current = {
+        start: Math.max(0, sample.t - step / 2),
+        end: sample.t + step / 2,
+        hits: sample.count,
+        max: sample.maxConfidence,
+        lastT: sample.t,
+      };
+      events.push(current);
+    }
+  });
+
+  return events.map(({ start, end, hits, max }) => ({
+    start,
+    end,
+    hits,
+    max_confidence: max,
+  }));
 }
 
 function renderEvents(events) {
@@ -467,9 +915,16 @@ async function startCamera() {
   const hint = $("#cameraHint");
   hint.className = "hint";
 
+  if (!window.isSecureContext) {
+    hint.className = "hint error";
+    hint.textContent =
+      "Camera access needs HTTPS (or localhost). Open the GitHub Pages address of this page and try again.";
+    return;
+  }
+
   if (!navigator.mediaDevices?.getUserMedia) {
     hint.className = "hint error";
-    hint.textContent = "This browser does not expose a camera API. Use localhost or HTTPS.";
+    hint.textContent = "This browser does not expose a camera API.";
     return;
   }
 
@@ -483,6 +938,7 @@ async function startCamera() {
     camera.placeholder.hidden = true;
     state.cameraOn = true;
     state.history = [];
+    state.fpsSamples = [];
     $("#cameraStart").disabled = true;
     $("#cameraStop").disabled = false;
     setStatus("camera live", "ok");
@@ -506,7 +962,7 @@ function stopCamera() {
   $("#cameraStop").disabled = true;
   $("#cameraAlert").hidden = true;
   clearOverlay();
-  setStatus("model ready", "ok");
+  setStatus(engine.session ? "model ready" : "loading model", engine.session ? "ok" : "");
 }
 
 function stopCameraLoop() {
@@ -553,28 +1009,15 @@ async function cameraTick() {
   const { sx, sy, sw, sh } = cropToAspect(video);
   ctx.drawImage(video, sx, sy, sw, sh, 0, 0, 640, 480);
 
-  const blob = await new Promise((resolve) =>
-    camera.capture.toBlob(resolve, "image/jpeg", 0.7)
-  );
-
-  if (blob) {
-    try {
-      const t0 = performance.now();
-      const fd = new FormData();
-      fd.append("image", blob, "frame.jpg");
-      fd.append("conf", state.conf);
-      fd.append("iou", state.iou);
-      fd.append("annotate", "0");
-      const data = await postForm("/api/detect", fd);
-      const rtt = performance.now() - t0;
-      updateCameraUi(data, rtt);
-      drawOverlay(data.detections);
-    } catch (err) {
-      console.warn(err);
-    }
+  try {
+    const result = await detect(camera.capture, 640, 480);
+    updateCameraUi(result, result.inference_ms);
+    drawOverlay(result.detections);
+  } catch (err) {
+    console.warn(err);
   }
 
-  if (state.cameraOn) state.cameraLoop = setTimeout(cameraTick, 90);
+  if (state.cameraOn) state.cameraLoop = setTimeout(cameraTick, 30);
 }
 
 function resizeOverlay() {
@@ -593,36 +1036,18 @@ function drawOverlay(detections) {
   resizeOverlay();
   const ctx = camera.overlay.getContext("2d");
   const { width: cw, height: ch } = camera.overlay;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, cw, ch);
   if (!detections?.length) return;
 
-  const sx = cw / 640;
-  const sy = ch / 480;
-  ctx.lineWidth = Math.max(2, cw / 320);
-  ctx.font = `${Math.max(12, cw / 50)}px ui-monospace, Consolas, monospace`;
-  ctx.textBaseline = "top";
-
-  for (const det of detections) {
-    const [x1, y1, x2, y2] = det.box;
-    const colour = det.confidence >= 0.5 ? "#35d0a5" : "#ffb454";
-    ctx.strokeStyle = colour;
-    ctx.strokeRect(x1 * sx, y1 * sy, (x2 - x1) * sx, (y2 - y1) * sy);
-
-    const label = `${det.label} ${det.confidence.toFixed(2)}`;
-    const textWidth = ctx.measureText(label).width;
-    const labelY = Math.max(0, y1 * sy - 22);
-    ctx.fillStyle = colour;
-    ctx.fillRect(x1 * sx, labelY, textWidth + 10, 20);
-    ctx.fillStyle = "#04120e";
-    ctx.fillText(label, x1 * sx + 5, labelY + 3);
-  }
+  drawLabels(ctx, detections, 640, 480, cw, ch, Math.max(2, cw / 320), Math.max(12, cw / 50));
 }
 
-function updateCameraUi(data, rtt) {
+function updateCameraUi(data, inferenceMs) {
   const alert = $("#cameraAlert");
-  if (data.count > 0) {
+  if (data.detections.length > 0) {
     alert.hidden = false;
-    $("#cameraAlertDetail").textContent = `${data.count} region(s) · top ${fmt(
+    $("#cameraAlertDetail").textContent = `${data.detections.length} region(s) · top ${fmt(
       data.detections[0].confidence
     )}`;
   } else {
@@ -632,18 +1057,18 @@ function updateCameraUi(data, rtt) {
   const top = data.detections[0]?.confidence || 0;
   $("#cameraMeter").style.width = `${Math.round(top * 100)}%`;
 
-  state.history.push(data.count ? top : 0);
+  state.history.push(data.detections.length ? top : 0);
   if (state.history.length > 60) state.history.shift();
   drawSparkline(state.history);
 
-  const fps = 1000 / Math.max(rtt, 1);
+  const fps = 1000 / Math.max(inferenceMs, 1);
   state.fpsSamples.push(fps);
   if (state.fpsSamples.length > 10) state.fpsSamples.shift();
   const avgFps = state.fpsSamples.reduce((a, b) => a + b, 0) / state.fpsSamples.length;
 
   $("#cameraStats").innerHTML =
-    statBox(data.count, "in this frame", data.count > 0) +
-    statBox(`${Math.round(rtt)} ms`, "round trip") +
+    statBox(data.detections.length, "in this frame", data.detections.length > 0) +
+    statBox(`${Math.round(inferenceMs)} ms`, "inference") +
     statBox(`${fmt(avgFps, 1)} fps`, "analyzed") +
     statBox(fmt(top), "top confidence", top >= 0.5);
 
