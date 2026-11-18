@@ -118,15 +118,3 @@ The test split was used for qualitative checks only.
 | Input | — | 640 × 640 |
 | Hardware | RTX 3060 6 GB | RTX 3060 6 GB |
 
-Reproducing the Detectron2 rows requires Detectron2 and the two ~300 MB checkpoints,
-which are not in this repository. The training scripts are kept in the paper repository.
-
-## Related work
-
-This is a standalone object-detection study. It is **not** part of the IR video anomaly
-detection capstone; the two projects happen to share a workspace, not a pipeline.
-
-## Ethics
-
-Research and education only. The model detects a single narrow class, performs no identity
-recognition and no tracking. Do not deploy it on people without consent.
